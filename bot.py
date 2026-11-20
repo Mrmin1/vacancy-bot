@@ -1,12 +1,12 @@
 import os
 import requests
 import time
+import xml.etree.ElementTree as ET
+from urllib.parse import quote
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# Челябинск - area 104 в HH
-# Ссылки с фильтрами: Челябинск + без опыта
 AVITO_LINK = "https://www.avito.ru/chelyabinsk/vakansii?experience=1"
 RABOTA_LINK = "https://www.rabota.ru/vacancy/?query=&city=chelyabinsk&experience=noExperience"
 
@@ -19,91 +19,48 @@ def send_telegram(text):
     except Exception as e:
         print(f"Ошибка отправки: {e}")
 
-def get_hh(params, label):
-    url = "https://api.hh.ru/vacancies"
+def get_hh_rss(url, label):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        "Accept": "application/rss+xml, application/xml, text/xml"
     }
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=20)
-        print(f"HH {label} -> статус {r.status_code}")
-        items = r.json().get("items", [])
-        print(f"HH {label} -> найдено {len(items)}")
+        r = requests.get(url, headers=headers, timeout=20)
+        print(f"RSS {label} -> статус {r.status_code}, длина {len(r.text)}")
+        if r.status_code != 200:
+            return []
+        root = ET.fromstring(r.content)
+        items = []
+        for item in root.findall(".//item"):
+            title = item.findtext("title", "")
+            link = item.findtext("link", "")
+            desc = item.findtext("description", "")
+            pub = item.findtext("pubDate", "")
+            # Чистим описание от HTML
+            import re
+            desc_clean = re.sub(r"<[^>]+>", "", desc)[:250]
+            items.append({"title": title, "link": link, "desc": desc_clean, "pub": pub})
+        print(f"RSS {label} -> найдено {len(items)}")
         return items
     except Exception as e:
-        print(f"Ошибка HH {label}: {e}")
+        print(f"Ошибка RSS {label}: {e}")
         return []
-
-def format_vac(v):
-    name = v.get("name", "Без названия")
-    salary = v.get("salary")
-    if salary:
-        s_from = salary.get("from") or ""
-        s_to = salary.get("to") or ""
-        currency = salary.get("currency", "RUR")
-        if s_from and s_to:
-            sal = f"{s_from}-{s_to} ₽"
-        elif s_from:
-            sal = f"от {s_from} ₽"
-        elif s_to:
-            sal = f"до {s_to} ₽"
-        else:
-            sal = "не указана"
-    else:
-        sal = "не указана"
-    employer = v.get("employer", {}).get("name", "")
-    area = v.get("area", {}).get("name", "")
-    exp = v.get("experience", {}).get("name", "")
-    schedule = v.get("schedule", {}).get("name", "")
-    link = v.get("alternate_url", "")
-    return (
-        f"💼 <b>{name}</b>\n"
-        f"🏢 {employer} | 📍 {area}\n"
-        f"💰 {sal}\n"
-        f"🧑‍💻 Опыт: {exp} | ⏰ {schedule}\n"
-        f"🔗 <a href='{link}'>Откликнуться на HH</a>"
-    )
 
 def job():
     all_vac = []
     seen = set()
 
-    # 1. Челябинск, без опыта, все свежие
-    params_chel = {
-        "area": 104,
-        "experience": "noExperience",
-        "per_page": 20,
-        "page": 0,
-        "order_by": "publication_time"
-    }
-    # 2. Удалёнка, без опыта, по всей России
-    params_remote = {
-        "area": 113,
-        "experience": "noExperience",
-        "schedule": "flexible",
-        "per_page": 20,
-        "page": 0,
-        "order_by": "publication_time"
-    }
-    # 3. Удалёнка, без опыта, прямо по слову remote
-    params_remote2 = {
-        "area": 113,
-        "experience": "noExperience",
-        "text": "удаленно",
-        "per_page": 20,
-        "page": 0,
-        "order_by": "publication_time"
-    }
+    # 1. Челябинск, без опыта
+    url1 = "https://hh.ru/search/vacancy/rss?area=104&experience=noExperience&order_by=publication_time"
+    # 2. Удалёнка, без опыта
+    url2 = "https://hh.ru/search/vacancy/rss?area=113&experience=noExperience&schedule=flexible&order_by=publication_time"
+    # 3. Удалёнка по слову
+    url3 = "https://hh.ru/search/vacancy/rss?area=113&experience=noExperience&text=" + quote("удаленно") + "&order_by=publication_time"
 
-    for params, label in [
-        (params_chel, "Челябинск без опыта"),
-        (params_remote, "Удалёнка без опыта"),
-        (params_remote2, "Удалёнка по слову"),
-    ]:
-        for v in get_hh(params, label):
-            if v["id"] not in seen:
-                seen.add(v["id"])
+    for url, label in [(url1, "Челябинск"), (url2, "Удалёнка"), (url3, "Удалёнка по слову")]:
+        for v in get_hh_rss(url, label):
+            if v["link"] not in seen:
+                seen.add(v["link"])
                 all_vac.append(v)
         if len(all_vac) >= 5:
             break
@@ -111,12 +68,17 @@ def job():
     print(f"Итого собрано: {len(all_vac)}")
 
     if not all_vac:
-        send_telegram("⚠️ Бот работает, но HH пока ничего не вернул. Запусти ещё раз через 5 минут.")
+        send_telegram("⚠️ Бот работает, но HH RSS пока ничего не вернул. Запусти ещё раз через 5 минут.")
         return
 
     send_telegram(f"🔥 <b>Новые вакансии без опыта: {len(all_vac[:5])} шт.</b>\n📍 Челябинск + удалёнка")
     for v in all_vac[:5]:
-        send_telegram(format_vac(v))
+        msg = (
+            f"💼 <b>{v['title']}</b>\n"
+            f"{v['desc']}\n"
+            f"🔗 <a href='{v['link']}'>Откликнуться на HH</a>"
+        )
+        send_telegram(msg)
         time.sleep(1)
 
     send_telegram(
@@ -126,6 +88,6 @@ def job():
     )
 
 if __name__ == "__main__":
-    print("Бот запущен - Челябинск + удалёнка, без опыта")
+    print("Бот запущен - RSS обход блокировки HH")
     job()
     print("Готово.")
