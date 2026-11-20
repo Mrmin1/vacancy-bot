@@ -4,42 +4,58 @@ import time
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
 import re
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+bot = telebot.TeleBot(BOT_TOKEN)
 
-AVITO_LINK = "https://www.avito.ru/chelyabinsk/vakansii?q=оператор+пк&experience=1"
-RABOTA_LINK = "https://www.rabota.ru/vacancy/?query=оператор+пк&city=chelyabinsk&experience=noExperience"
+# Категории - только Челябинск, area=104
+CATEGORIES = {
+    "op_pk": {
+        "name": "💻 Оператор ПК",
+        "queries": ["оператор пк", "оператор ввода данных", "оператор базы данных"]
+    },
+    "chat": {
+        "name": "💬 Чат-поддержка",
+        "queries": ["оператор чата", "чат поддержка", "специалист поддержки", "оператор поддержки"]
+    },
+    "design": {
+        "name": "🎨 Дизайнер инфографики",
+        "queries": ["дизайнер инфографики", "дизайнер карточек", "дизайнер маркетплейсов"]
+    },
+    "moder": {
+        "name": "🛡️ Модератор",
+        "queries": ["модератор чата", "модератор", "модератор сообщества"]
+    },
+    "call": {
+        "name": "📞 Оператор колл-центра",
+        "queries": ["оператор колл центра", "оператор call центра"]
+    },
+    "all_chel": {
+        "name": "📍 Все свежие в Челябинске",
+        "queries": [""]  # без текста - все вакансии Челябинска без опыта
+    },
+}
 
-# Твои профессии
-PROFESSIONS = [
-    "оператор пк",
-    "оператор чата",
-    "чат поддержка",
-    "специалист поддержки",
-    "дизайнер инфографики",
-    "дизайнер карточек",
-    "модератор чата",
-    "оператор колл центра",
-]
+def get_keyboard():
+    markup = InlineKeyboardMarkup(row_width=1)
+    for key, cat in CATEGORIES.items():
+        markup.add(InlineKeyboardButton(cat["name"], callback_data=f"cat_{key}"))
+    return markup
 
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    try:
-        resp = requests.post(url, data=payload, timeout=15)
-        print(f"Отправка в TG: {resp.status_code}")
-    except Exception as e:
-        print(f"Ошибка отправки: {e}")
-
-def get_hh_rss(url, label):
+def get_hh_rss(query):
+    # Только Челябинск! area=104, без опыта
+    if query == "":
+        url = "https://hh.ru/search/vacancy/rss?area=104&experience=noExperience&order_by=publication_time"
+    else:
+        url = f"https://hh.ru/search/vacancy/rss?area=104&experience=noExperience&text={quote(query)}&order_by=publication_time"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
         "Accept": "application/rss+xml, application/xml, text/xml"
     }
     try:
         r = requests.get(url, headers=headers, timeout=20)
-        print(f"RSS {label} -> статус {r.status_code}")
         if r.status_code != 200:
             return []
         root = ET.fromstring(r.content)
@@ -50,58 +66,54 @@ def get_hh_rss(url, label):
             desc = item.findtext("description", "")
             desc_clean = re.sub(r"<[^>]+>", "", desc)[:250]
             items.append({"title": title, "link": link, "desc": desc_clean})
-        print(f"RSS {label} -> найдено {len(items)}")
         return items
-    except Exception as e:
-        print(f"Ошибка RSS {label}: {e}")
+    except:
         return []
 
-def job():
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(
+        message.chat.id,
+        "👋 Привет!\n\nВыбери категорию — пришлю 5 свежих вакансий\n📍 Только Челябинск, без опыта:",
+        reply_markup=get_keyboard()
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cat_"))
+def handle_category(call):
+    key = call.data.replace("cat_", "")
+    cat = CATEGORIES.get(key)
+    if not cat:
+        return
+
+    bot.answer_callback_query(call.id, f"Ищу: {cat['name']}...")
+    bot.send_message(call.message.chat.id, f"🔎 Ищу: <b>{cat['name']}</b>\n📍 Только Челябинск, без опыта...", parse_mode="HTML")
+
     all_vac = []
     seen = set()
-
-    # Проходим по каждой профессии: сначала Челябинск, потом удалёнка
-    for prof in PROFESSIONS:
-        # Челябинск, без опыта, по профессии
-        url_chel = f"https://hh.ru/search/vacancy/rss?area=104&experience=noExperience&text={quote(prof)}&order_by=publication_time"
-        for v in get_hh_rss(url_chel, f"{prof} - Челябинск"):
+    for q in cat["queries"]:
+        for v in get_hh_rss(q):
             if v["link"] not in seen:
                 seen.add(v["link"])
                 all_vac.append(v)
-
-        # Удалёнка, без опыта, по профессии
-        url_remote = f"https://hh.ru/search/vacancy/rss?area=113&experience=noExperience&schedule=flexible&text={quote(prof)}&order_by=publication_time"
-        for v in get_hh_rss(url_remote, f"{prof} - Удалёнка"):
-            if v["link"] not in seen:
-                seen.add(v["link"])
-                all_vac.append(v)
-
         if len(all_vac) >= 5:
             break
 
-    print(f"Итого собрано: {len(all_vac)}")
-
     if not all_vac:
-        send_telegram("⚠️ Бот работает, но по твоим профессиям сейчас ничего свежего. Запусти ещё раз через 1 час.")
+        bot.send_message(call.message.chat.id, "😔 По этой категории сейчас ничего свежего в Челябинске. Попробуй другую категорию.", reply_markup=get_keyboard())
         return
 
-    send_telegram(f"🔥 <b>Вакансии по твоим профессиям: {len(all_vac[:5])} шт.</b>\n💻 Оператор ПК | 💬 Чат-поддержка | 🎨 Дизайнер инфографики\n📍 Челябинск + удалёнка, без опыта")
+    bot.send_message(call.message.chat.id, f"🔥 <b>Нашёл {len(all_vac[:5])} вакансий:</b>", parse_mode="HTML")
     for v in all_vac[:5]:
-        msg = (
-            f"💼 <b>{v['title']}</b>\n"
-            f"{v['desc']}\n"
-            f"🔗 <a href='{v['link']}'>Откликнуться на HH</a>"
-        )
-        send_telegram(msg)
-        time.sleep(1)
+        msg = f"💼 <b>{v['title']}</b>\n{v['desc']}\n🔗 <a href='{v['link']}'>Откликнуться на HH</a>"
+        bot.send_message(call.message.chat.id, msg, parse_mode="HTML", disable_web_page_preview=True)
+        time.sleep(0.5)
 
-    send_telegram(
-        f"📋 <b>Ещё по твоим профессиям:</b>\n"
-        f"🔗 <a href='{AVITO_LINK}'>Avito — Оператор ПК, Челябинск</a>\n"
-        f"🔗 <a href='{RABOTA_LINK}'>Работа.ру — Оператор ПК, Челябинск</a>"
+    bot.send_message(
+        call.message.chat.id,
+        "Выбери ещё категорию:",
+        reply_markup=get_keyboard()
     )
 
 if __name__ == "__main__":
-    print("Бот запущен - по профессиям: оператор ПК, чат-поддержка, дизайнер")
-    job()
-    print("Готово.")
+    print("Бот с кнопками запущен - только Челябинск")
+    bot.infinity_polling()
